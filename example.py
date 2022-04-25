@@ -3,6 +3,27 @@ import pycuda.autoinit
 import numpy as np
 import tensorrt as trt
 
+import cv2
+import torch
+from albumentations import Resize, Compose
+from albumentations.pytorch.transforms import  ToTensor
+from albumentations.augmentations.transforms import Normalize
+
+
+def preprocess_image(img_path):
+    # transformations for the input data
+    transforms = Compose([
+        Resize(224, 224, interpolation=cv2.INTER_NEAREST),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ToTensor(),
+    ])
+
+    # read input image
+    input_img = cv2.imread(img_path)
+    # do transformations
+    input_data = transforms(image=input_img)["image"]
+
+
 # logger to capture errors, warnings, and other information during the build and inference phases
 TRT_LOGGER = trt.Logger()
 
@@ -36,6 +57,10 @@ def build_engine(onnx_file_path):
 
 
 def main():
+
+
+    ONNX_FILE_PATH = "./data/"
+
     # initialize TensorRT engine and parse ONNX model
     engine, context = build_engine(ONNX_FILE_PATH)
 
@@ -50,4 +75,27 @@ def main():
             # create page-locked memory buffers (i.e. won't be swapped to disk)
             host_output = cuda.pagelocked_empty(trt.volume(output_shape) * engine.max_batch_size, dtype=np.float32)
             device_output = cuda.mem_alloc(host_output.nbytes)
+            
+
+    # Create a stream in which to copy inputs/outputs and run inference.
+    stream = cuda.Stream()
+
+    # preprocess input data
+    host_input = np.array(preprocess_image().numpy(), dtype=np.float32, order='C')
+    cuda.memcpy_htod_async(device_input, host_input, stream)
+
+
+    # run inference
+    context.execute_async(bindings=[int(device_input), int(device_output)], stream_handle=stream.handle)
+    cuda.memcpy_dtoh_async(host_output, device_output, stream)
+    stream.synchronize()
+
+    # postprocess results
+    output_data = torch.Tensor(host_output).reshape(engine.max_batch_size, output_shape[0])
+    postprocess(output_data)
+
+
+if __name__ == "__main__":
+
+    main()
 
