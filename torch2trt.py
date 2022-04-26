@@ -129,7 +129,7 @@ def main():
 
 
     # run inference
-    context.execute_async(bindings=[int(device_input.data_ptr()), int(device_output)], stream_handle=stream.handle)
+    context.execute_async(bindings=[int(device_input.contiguous().data_ptr()), int(device_output)], stream_handle=stream.handle)
     # memcpy_dtoh_asunc(cpu_memory, gpu_memory, stream): gpu -> cpu
     # it may take a lot of time because coping
     cuda.memcpy_dtoh_async(host_output, device_output, stream)
