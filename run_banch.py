@@ -1,7 +1,9 @@
 import pycuda.driver as cuda
+from tqdm import tqdm
 import pycuda.autoinit
 import numpy as np
 import tensorrt as trt
+from time import time
 
 import cv2
 import torch
@@ -10,20 +12,7 @@ from albumentations.pytorch.transforms import  ToTensorV2
 from albumentations.augmentations.transforms import Normalize
 
 
-def preprocess_image(img_path):
-    # transformations for the input data
-    transforms = Compose([
-        Resize(224, 224, interpolation=cv2.INTER_NEAREST),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ToTensorV2(),
-    ])
-
-    # read input image
-    input_img = cv2.imread(img_path)
-    # do transformations
-    input_data = transforms(image=input_img)["image"]
-    batch_data = torch.unsqueeze(input_data, 0)
-    return batch_data
+BATCH_SIZE = 1024
 
 
 def postprocess(output_data):
@@ -67,7 +56,7 @@ def build_engine(onnx_file_path):
     # allow TensorRT to use up to 1GB of GPU memory for tactic selection
     # builder.max_workspace_size = 1 << 30
     # we have only one image in batch
-    builder.max_batch_size = 1
+    builder.max_batch_size = BATCH_SIZE
     # use FP16 mode if possible
     if builder.platform_has_fast_fp16:
         builder.fp16_mode = True
@@ -92,9 +81,15 @@ def build_engine(onnx_file_path):
 
 def main():
 
+    from pathlib import Path
+    from dataset import FlowerDataset
+    from torch.utils.data import DataLoader
+
+    dataset = FlowerDataset("./data/")
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
 
     ONNX_FILE_PATH = "./models/ResNet50.onnx"
-    IMAGE_PATH = "./data/image_00001.jpg"
+    USE_TORCH = False
     
     # initialize TensorRT engine and parse ONNX model
     engine, context = build_engine(ONNX_FILE_PATH)
@@ -115,21 +110,36 @@ def main():
 
     # Create a stream in which to copy inputs/outputs and run inference.
     stream = cuda.Stream()
-
+    
     # preprocess input data
-    host_input = np.array(preprocess_image(IMAGE_PATH).numpy(), dtype=np.float32, order='C')
-    cuda.memcpy_htod_async(device_input, host_input, stream)
+
+    times = []
+    for num, batch in enumerate(tqdm(dataloader)):
+
+        # let's imagine we have already had a tensor on GPU
+        batch.to("cuda")
+
+        start_time = time()
+
+        if not USE_TORCH:
+            # copy batch from cpu to gpu. device_input will be passed as tensorrt binding
+            host_input = np.array(batch.cpu().numpy(), dtype=np.float32, order="C")
+            cuda.memcpy_htod_async(device_input, host_input, stream)
+        else:
+            device_input = batch.cuda().contiguous().data_ptr()
+
+        # run inference
+        context.execute_async(bindings=[int(device_input), int(device_output)], stream_handle=stream.handle)
+        cuda.memcpy_dtoh_async(host_output, device_output, stream)
+        stream.synchronize()
+
+        times.append(time() - start_time)
 
 
-    # run inference
-    context.execute_async(bindings=[int(device_input), int(device_output)], stream_handle=stream.handle)
-    cuda.memcpy_dtoh_async(host_output, device_output, stream)
-    stream.synchronize()
-
-    print(type(host_output), host_output.shape, output_shape[0], engine.max_batch_size)
-    # postprocess results
-    output_data = torch.Tensor(host_output).reshape(engine.max_batch_size, -1)
-    postprocess(output_data)
+    quantile_5 = np.quantile(times, 0.05)
+    quantile_95 = np.quantile(times, 0.95)
+    times = [t for t in times if quantile_5 <= t <= quantile_95]
+    print(f"MEAN={np.mean(times)}, MEDIAN={np.median(times)}, STD={np.std(times)}")
 
 
 if __name__ == "__main__":
