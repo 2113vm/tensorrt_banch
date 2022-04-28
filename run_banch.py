@@ -12,7 +12,7 @@ from albumentations.pytorch.transforms import  ToTensorV2
 from albumentations.augmentations.transforms import Normalize
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 800
 
 
 def postprocess(output_data):
@@ -123,8 +123,11 @@ def main():
 
         if not USE_TORCH:
             # copy batch from cpu to gpu. device_input will be passed as tensorrt binding
-            host_input = np.array(batch.cpu().numpy(), dtype=np.float32, order="C")
-            cuda.memcpy_htod_async(device_input, host_input, stream)
+            host_input = torch.Tensor(np.array(batch.cpu().numpy()))
+            # second option to create contiguous array
+            # host_input = np.array(batch.cpu().numpy(), dtype=np.float32, order="C")
+            device_input = host_input.cuda().data_ptr()
+            # cuda.memcpy_htod_async(device_input, host_input, stream)
         else:
             device_input = batch.cuda().contiguous().data_ptr()
 
