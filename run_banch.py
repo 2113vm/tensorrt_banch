@@ -12,7 +12,7 @@ from albumentations.pytorch.transforms import  ToTensorV2
 from albumentations.augmentations.transforms import Normalize
 
 
-BATCH_SIZE = 1024
+BATCH_SIZE = 2
 
 
 def postprocess(output_data):
@@ -132,6 +132,8 @@ def main():
         context.execute_async(bindings=[int(device_input), int(device_output)], stream_handle=stream.handle)
         cuda.memcpy_dtoh_async(host_output, device_output, stream)
         stream.synchronize()
+
+        output_data = torch.Tensor(host_output).reshape(engine.max_batch_size, -1).to('cuda')
 
         times.append(time() - start_time)
 
